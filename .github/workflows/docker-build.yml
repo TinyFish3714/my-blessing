@@ -34,4 +34,4 @@ jobs:
           platforms: linux/amd64      # ClawCloud 只用 amd64
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/tinyfish3714/my-blessing:latest
