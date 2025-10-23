@@ -1,82 +1,41 @@
-FROM composer:latest as vendor
-
-WORKDIR /app
-
-COPY composer.json composer.lock ./
-
-RUN composer install \
-    --prefer-dist \
-    --no-dev \
-    --no-suggest \
-    --no-progress \
-    --no-autoloader \
-    --no-scripts \
-    --no-interaction \
-    --ignore-platform-reqs
-
+# 前端构建阶段
 FROM node:alpine as frontend
-
 WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --production=false && npm run build
 
-COPY package.json yarn.lock ./
-RUN yarn install --frozen-lockfile
-
-COPY postcss.config.js tsconfig.build.json tsconfig.json webpack.config.ts ./
-COPY tools/*Plugin.ts ./tools/
-
-COPY resources ./resources
-
-RUN yarn build && \
-    cp resources/assets/src/images/bg.webp public/app/ && \
-    cp resources/assets/src/images/favicon.ico public/app/ && \
-    # Strip unused files
-    rm -rf *.config.js *.config.ts tsconfig.* \
-      package.json yarn.lock node_modules/ \
-      resources/assets/ resources/lang resources/misc resources/misc/backgrounds/ \
-      tools/
-
-FROM composer:latest as builder
-
+# PHP 依赖阶段
+FROM composer:2 as vendor
 WORKDIR /app
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --optimize-autoloader --no-scripts
 
+# 最终运行镜像
+FROM php:8.2-fpm-alpine
+RUN apk add --no-cache \
+    nginx \
+    supervisor \
+    libzip-dev \
+    icu-dev \
+    oniguruma-dev \
+    && docker-php-ext-install pdo_mysql zip intl mbstring opcache
+
+# 复制配置
+COPY docker/nginx.conf     /etc/nginx/nginx.conf
+COPY docker/supervisord.conf /etc/supervisord.conf
+COPY docker/php-fpm.conf   /usr/local/etc/php-fpm.d/www.conf
+COPY docker/entrypoint.sh  /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+WORKDIR /var/www/html
+# 依次复制代码、依赖、前端产物
 COPY . ./
-
-COPY --from=vendor /app ./
+COPY --from=vendor /app/vendor ./vendor
 COPY --from=frontend /app/public ./public
 COPY --from=frontend /app/resources/views/assets ./resources/views/assets
 
-RUN composer dump-autoload -o --no-dev -n && \
-    rm -rf *.config.js *.config.ts tsconfig.* \
-      package.json yarn.lock node_modules/ \
-      resources/assets/ resources/misc resources/misc/backgrounds/ \
-      tools/ && \
-    mv .env.example .env && \
-    php artisan key:generate && \
-    mv .env storage/ && \
-    ln -s storage/.env .env && \
-    touch storage/database.db && \
-    mkdir storage/plugins && \
-    sed 's/PLUGINS_DIR=null/PLUGINS_DIR=\/app\/storage\/plugins/' -i storage/.env && \
-    sed 's/DB_CONNECTION=mysql/DB_CONNECTION=sqlite/' -i storage/.env && \
-    sed 's/DB_DATABASE=blessingskin/DB_DATABASE=\/app\/storage\/database\.db/' -i storage/.env
-
-FROM php:8-apache
-
-ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
-
-RUN chmod +x /usr/local/bin/install-php-extensions && \
-    install-php-extensions gd zip
-
-WORKDIR /app
-
-COPY --from=builder /app ./
-
-ENV APACHE_DOCUMENT_ROOT /app/public
-RUN chown -R www-data:www-data . && \
-    sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf && \
-    sed -ri -e 's!/var/www/!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf && \
-    a2enmod rewrite headers
-
+# 权限 & 入口
+RUN chown -R www-data:www-data /var/www/html \
+ && chmod -R 755 /var/www/html/storage /var/www/html/bootstrap/cache
 EXPOSE 80
-
-VOLUME ["/app/storage"]
+ENTRYPOINT ["/entrypoint.sh"]
